@@ -6,12 +6,22 @@ const { app, BrowserWindow, Menu, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { openDb } = require('./db');
-const { registerIpc } = require('./ipc');
+const registerIpc = require('./ipc');
 
 // 保持 ASCII 的 userData 路径（%APPDATA%/up-quest）
 app.setName('up-quest');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
+
+// 启动期错误一律落盘（%APPDATA%/up-quest/error.log），避免"无窗口静默失败"
+function logError(err) {
+  try {
+    const line = `[${new Date().toISOString()}] ${(err && err.stack) || String(err)}\n`;
+    fs.appendFileSync(path.join(app.getPath('userData'), 'error.log'), line);
+  } catch { /* 忽略日志失败 */ }
+}
+process.on('uncaughtException', (err) => logError(err));
+process.on('unhandledRejection', (reason) => logError(reason instanceof Error ? reason : new Error(String(reason))));
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -96,6 +106,17 @@ if (!gotLock) {
 
     win.once('ready-to-show', () => win.show());
 
+    // 保险：渲染进程异常缓慢时也强制显示，避免"进程在跑、窗口不出现"
+    setTimeout(() => {
+      if (win && !win.isDestroyed() && !win.isVisible()) {
+        win.show();
+        logError(new Error('ready-to-show 超时，已强制显示窗口'));
+      }
+    }, 5000);
+    win.webContents.on('did-fail-load', (_e, code, desc) => {
+      logError(new Error(`页面加载失败 code=${code} desc=${desc}`));
+    });
+
     if (DEV_URL) {
       win.loadURL(DEV_URL);
     } else {
@@ -122,7 +143,7 @@ if (!gotLock) {
     ensureDirs();
     cleanInbox();
     const db = openDb(path.join(dataDir(), 'up.db'));
-    registerIpc({ ipcMain: require('electron').ipcMain, db, dataDir, dialog: require('electron').dialog, shell });
+    registerIpc({ ipcMain: require('electron').ipcMain, db, dataDir: dataDir(), dialog: require('electron').dialog, shell });
     buildMenu();
     createWindow();
 
